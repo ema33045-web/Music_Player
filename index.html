@@ -148,6 +148,9 @@ body.search-open { padding-top: calc(56px + 64px + env(safe-area-inset-top)); }
 
 /* TRACK LIST */
 .track-list { display: flex; flex-direction: column; gap: 8px; padding-bottom: 8px; }
+.track-list.virtual { display: block; position: relative; padding-bottom: 0; }
+.track-list.virtual .virtual-spacer { position: relative; width: 100%; }
+.track-list.virtual .track-card { position: absolute; left: 0; right: 0; box-sizing: border-box; }
 .track-card {
   display: flex; align-items: center; gap: 14px; padding: 12px 14px;
   background: var(--surface); border-radius: var(--r-md); border: 1px solid var(--border);
@@ -587,35 +590,46 @@ const state = {
   activePlaylistId: null, playlistModalMode: null, targetPlaylistId: null,
 };
 
-const DB_NAME = 'wavve_db', DB_VERSION = 1, STORE_NAME = 'audio_blobs';
+const DB_NAME = 'wavve_db', DB_VERSION = 2, STORE_NAME = 'audio_blobs', COVER_STORE = 'covers';
 let db = null;
 
 function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = e => { e.target.result.createObjectStore(STORE_NAME); };
+    req.onupgradeneeded = e => {
+      const idb = e.target.result;
+      if (!idb.objectStoreNames.contains(STORE_NAME)) idb.createObjectStore(STORE_NAME);
+      if (!idb.objectStoreNames.contains(COVER_STORE)) idb.createObjectStore(COVER_STORE);
+    };
     req.onsuccess = e => resolve(e.target.result);
     req.onerror   = e => reject(e.target.error);
   });
 }
-function dbSet(key, blob) {
+function dbSet(key, blob, storeName = STORE_NAME) {
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const req = tx.objectStore(STORE_NAME).put(blob, key);
+    const tx = db.transaction(storeName, 'readwrite');
+    const req = tx.objectStore(storeName).put(blob, key);
     req.onsuccess = () => resolve(); req.onerror = e => reject(e.target.error);
   });
 }
-function dbGet(key) {
+function dbGet(key, storeName = STORE_NAME) {
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readonly');
-    const req = tx.objectStore(STORE_NAME).get(key);
+    const tx = db.transaction(storeName, 'readonly');
+    const req = tx.objectStore(storeName).get(key);
     req.onsuccess = e => resolve(e.target.result); req.onerror = e => reject(e.target.error);
+  });
+}
+function dbDelete(key, storeName = STORE_NAME) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    const req = tx.objectStore(storeName).delete(key);
+    req.onsuccess = () => resolve(); req.onerror = e => reject(e.target.error);
   });
 }
 
 const LS_TRACKS = 'wavve_tracks', LS_PLAYLISTS = 'wavve_playlists';
 function persistTracks() {
-  const toSave = state.tracks.map(t => ({ ...t, objectUrl: undefined }));
+  const toSave = state.tracks.map(({ objectUrl, coverDataUrl, coverObjectUrl, ...rest }) => rest);
   localStorage.setItem(LS_TRACKS, JSON.stringify(toSave));
 }
 function persistPlaylists() { localStorage.setItem(LS_PLAYLISTS, JSON.stringify(state.playlists)); }
@@ -626,7 +640,16 @@ async function loadPersistedTracks() {
   for (const t of saved) {
     try {
       const blob = await dbGet(t.blobKey);
-      if (blob) { t.objectUrl = URL.createObjectURL(blob); tracks.push(t); }
+      if (blob) {
+        t.objectUrl = URL.createObjectURL(blob);
+        if (t.hasCover) {
+          try {
+            const coverBlob = await dbGet(t.blobKey, COVER_STORE);
+            if (coverBlob) t.coverObjectUrl = URL.createObjectURL(coverBlob);
+          } catch {}
+        }
+        tracks.push(t);
+      }
     } catch {}
   }
   state.tracks = tracks;
@@ -715,7 +738,7 @@ function placeholderHtml(track) {
   return `<div class="track-cover-placeholder" style="background:linear-gradient(135deg,${c1},${c2})">${initials(track)}</div>`;
 }
 function coverHtml(track, size = '') {
-  if (track.coverDataUrl) return `<img src="${track.coverDataUrl}" alt="Cover" ${size ? `style="${size}"` : ''} />`;
+  if (track.coverObjectUrl) return `<img src="${track.coverObjectUrl}" alt="Cover" ${size ? `style="${size}"` : ''} loading="lazy" />`;
   return placeholderHtml(track);
 }
 function waveformHtml(heights = [40,70,55,85,50]) {
@@ -742,18 +765,17 @@ function extractMetadata(file) {
           if (t.title) title = t.title;
           if (t.artist) artist = t.artist;
           if (t.album) album = t.album;
-          let coverDataUrl = null;
+          let coverBlob = null;
           if (t.picture) {
             const { data, format } = t.picture;
-            const base64 = btoa(new Uint8Array(data).reduce((d, b) => d + String.fromCharCode(b), ''));
-            coverDataUrl = `data:${format};base64,${base64}`;
+            coverBlob = new Blob([new Uint8Array(data)], { type: format });
           }
-          resolve({ title, artist, album, coverDataUrl });
+          resolve({ title, artist, album, coverBlob });
         },
-        onError() { resolve({ title, artist, album, coverDataUrl: null }); },
+        onError() { resolve({ title, artist, album, coverBlob: null }); },
       });
     } else {
-      resolve({ title, artist, album, coverDataUrl: null });
+      resolve({ title, artist, album, coverBlob: null });
     }
   });
 }
@@ -767,8 +789,14 @@ async function handleFileImport(files) {
     const meta = await extractMetadata(file);
     const blobKey = uid();
     await dbSet(blobKey, file);
+    let coverObjectUrl = null, hasCover = false;
+    if (meta.coverBlob) {
+      await dbSet(blobKey, meta.coverBlob, COVER_STORE);
+      coverObjectUrl = URL.createObjectURL(meta.coverBlob);
+      hasCover = true;
+    }
     const objectUrl = URL.createObjectURL(file);
-    state.tracks.push({ id: uid(), title: meta.title, artist: meta.artist, album: meta.album, coverDataUrl: meta.coverDataUrl, duration: 0, blobKey, objectUrl, _fileName: file.name, _fileSize: file.size });
+    state.tracks.push({ id: uid(), title: meta.title, artist: meta.artist, album: meta.album, hasCover, coverObjectUrl, duration: 0, blobKey, objectUrl, _fileName: file.name, _fileSize: file.size });
     addedCount++;
   }
   if (addedCount > 0) {
@@ -831,8 +859,8 @@ function shufflePlay(trackPool = null) {
 }
 
 function updatePlayerUI(track) {
-  elems.playerCover.innerHTML = track.coverDataUrl
-    ? `<img src="${track.coverDataUrl}" alt="Cover" />`
+  elems.playerCover.innerHTML = track.coverObjectUrl
+    ? `<img src="${track.coverObjectUrl}" alt="Cover" />`
     : `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`;
   elems.playerTitle.textContent = track.title;
   elems.playerArtist.textContent = track.artist;
@@ -856,9 +884,17 @@ function getFilteredIndices() {
   }, []);
 }
 
+const ROW_HEIGHT = 84; // track-card height (76px) + gap (8px)
+const VIRTUAL_THRESHOLD = 60; // only virtualize beyond this many items
+let virtualState = { indices: [], rendered: new Map() };
+
 function renderTrackList() {
-  const indices = getFilteredIndices(), activeTrackIndex = state.queue[state.currentIndex];
+  const indices = getFilteredIndices();
+  state.lastIndices = indices;
   Array.from(elems.trackList.children).forEach(child => { if (child !== elems.emptyState) child.remove(); });
+  elems.trackList.classList.remove('virtual');
+  virtualState.rendered.clear();
+
   if (state.tracks.length === 0) { elems.emptyState.style.display = ''; return; }
   elems.emptyState.style.display = 'none';
   if (indices.length === 0) {
@@ -867,20 +903,78 @@ function renderTrackList() {
     noResult.innerHTML = `<div class="empty-icon"><svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></div><p class="empty-title">No results</p><p class="empty-sub">Try a different search term</p>`;
     elems.trackList.appendChild(noResult); return;
   }
+
+  if (indices.length > VIRTUAL_THRESHOLD) {
+    renderVirtualTrackList(indices);
+  } else {
+    renderFullTrackList(indices);
+  }
+}
+
+function createTrackCard(idx) {
+  const track = state.tracks[idx], activeTrackIndex = state.queue[state.currentIndex];
+  const isActive = idx === activeTrackIndex;
+  const card = document.createElement('div');
+  card.className = `track-card${isActive ? ' active' : ''}`;
+  card.dataset.trackIndex = idx;
+  card.setAttribute('role', 'button'); card.setAttribute('tabindex', '0');
+  card.setAttribute('aria-label', `Play ${track.title} by ${track.artist}`);
+  const heights = [35,65,50,80,45].map(h => { const j = ((track.title.charCodeAt(0)||0)+h)%40; return Math.max(20,Math.min(90,h+j-20)); });
+  card.innerHTML = `<div class="track-cover">${coverHtml(track)}</div><div class="track-info"><div class="track-title">${escapeHtml(track.title)}</div><div class="track-artist">${escapeHtml(track.artist)}</div></div>${waveformHtml(heights)}`;
+  return card;
+}
+
+function renderFullTrackList(indices) {
   const fragment = document.createDocumentFragment();
-  indices.forEach(idx => {
-    const track = state.tracks[idx], isActive = idx === activeTrackIndex;
-    const card = document.createElement('div');
-    card.className = `track-card${isActive ? ' active' : ''}`;
-    card.dataset.trackIndex = idx;
-    card.setAttribute('role', 'button'); card.setAttribute('tabindex', '0');
-    card.setAttribute('aria-label', `Play ${track.title} by ${track.artist}`);
-    const heights = [35,65,50,80,45].map(h => { const j = ((track.title.charCodeAt(0)||0)+h)%40; return Math.max(20,Math.min(90,h+j-20)); });
-    card.innerHTML = `<div class="track-cover">${coverHtml(track)}</div><div class="track-info"><div class="track-title">${escapeHtml(track.title)}</div><div class="track-artist">${escapeHtml(track.artist)}</div></div>${waveformHtml(heights)}`;
-    fragment.appendChild(card);
-  });
+  indices.forEach(idx => fragment.appendChild(createTrackCard(idx)));
   elems.trackList.appendChild(fragment);
 }
+
+function renderVirtualTrackList(indices) {
+  elems.trackList.classList.add('virtual');
+  virtualState.indices = indices;
+  const spacer = document.createElement('div');
+  spacer.className = 'virtual-spacer';
+  spacer.style.height = (indices.length * ROW_HEIGHT) + 'px';
+  elems.trackList.appendChild(spacer);
+  updateVirtualWindow();
+}
+
+function updateVirtualWindow() {
+  if (!elems.trackList.classList.contains('virtual')) return;
+  const indices = virtualState.indices;
+  if (!indices || indices.length === 0) return;
+  const listTop = elems.trackList.getBoundingClientRect().top + window.scrollY;
+  const viewTop = window.scrollY, viewBottom = window.scrollY + window.innerHeight;
+  const relTop = Math.max(0, viewTop - listTop), relBottom = Math.max(0, viewBottom - listTop);
+  const overscan = 6;
+  let startRow = Math.max(0, Math.floor(relTop / ROW_HEIGHT) - overscan);
+  let endRow = Math.min(indices.length - 1, Math.ceil(relBottom / ROW_HEIGHT) + overscan);
+
+  // Remove cards out of range
+  for (const [pos, card] of virtualState.rendered) {
+    if (pos < startRow || pos > endRow) { card.remove(); virtualState.rendered.delete(pos); }
+  }
+  // Add cards in range
+  const spacer = elems.trackList.querySelector('.virtual-spacer');
+  for (let pos = startRow; pos <= endRow; pos++) {
+    if (virtualState.rendered.has(pos)) continue;
+    const idx = indices[pos];
+    const card = createTrackCard(idx);
+    card.style.top = (pos * ROW_HEIGHT) + 'px';
+    elems.trackList.appendChild(card);
+    virtualState.rendered.set(pos, card);
+  }
+}
+
+let virtualScrollScheduled = false;
+function onVirtualScroll() {
+  if (virtualScrollScheduled) return;
+  virtualScrollScheduled = true;
+  requestAnimationFrame(() => { updateVirtualWindow(); virtualScrollScheduled = false; });
+}
+window.addEventListener('scroll', onVirtualScroll, { passive: true });
+window.addEventListener('resize', onVirtualScroll);
 
 function renderPlaylistGrid() {
   Array.from(elems.playlistGrid.children).forEach(child => { if (child !== elems.emptyPlaylistState) child.remove(); });
@@ -922,10 +1016,10 @@ function buildPlaylistCoverHtml(playlist, gridClass, phClass) {
   if (tracks.length === 0) return `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`;
   if (tracks.length === 1) {
     const t = tracks[0];
-    return t.coverDataUrl ? `<img src="${t.coverDataUrl}" alt="Cover" />` : `<div class="${phClass}" style="width:100%;height:100%;background:linear-gradient(135deg,${gradientForTrack(t.title).join(',')});display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-weight:700;color:var(--yellow);font-size:1.75rem">${initials(t)}</div>`;
+    return t.coverObjectUrl ? `<img src="${t.coverObjectUrl}" alt="Cover" />` : `<div class="${phClass}" style="width:100%;height:100%;background:linear-gradient(135deg,${gradientForTrack(t.title).join(',')});display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-weight:700;color:var(--yellow);font-size:1.75rem">${initials(t)}</div>`;
   }
   const cells = tracks.map(t => {
-    if (t.coverDataUrl) return `<img src="${t.coverDataUrl}" alt="Cover" />`;
+    if (t.coverObjectUrl) return `<img src="${t.coverObjectUrl}" alt="Cover" />`;
     const [c1,c2] = gradientForTrack(t.title);
     return `<div class="${phClass}" style="background:linear-gradient(135deg,${c1},${c2})">${initials(t)}</div>`;
   }).join('');
