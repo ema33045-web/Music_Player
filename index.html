@@ -165,8 +165,8 @@ body.search-open { padding-top: calc(56px + 64px + env(safe-area-inset-top)); }
 .track-card:hover { background: var(--surface-raised); border-color: rgba(255,255,255,0.10); transform: translateX(2px); }
 .track-card:hover::before { transform: scaleY(1); }
 .track-card.active {
-  background: linear-gradient(90deg, rgba(255, 214, 0, 0.16) 0%, rgba(255, 214, 0, 0.05) 45%, var(--surface-raised) 85%);
-  border-color: rgba(255, 214, 0, 0.25);
+  background: linear-gradient(90deg, rgba(255, 220, 80, 0.18) 0%, rgba(255, 220, 80, 0.07) 55%, rgba(26, 26, 26, 0.0) 100%);
+  border-color: rgba(255, 214, 0, 0.22);
 }
 .track-card.active::before { transform: scaleY(1); }
 
@@ -314,23 +314,47 @@ body.paused .track-card.active .waveform-bar { animation-play-state: paused; }
 }
 .mini-player::before {
   content: ''; position: absolute; inset: 0; z-index: 0; pointer-events: none;
-  background: linear-gradient(100deg,
+  background: linear-gradient(95deg,
     transparent 0%,
-    rgba(255, 214, 0, 0.10) 35%,
-    rgba(255, 214, 0, 0.18) 50%,
-    rgba(255, 214, 0, 0.10) 65%,
+    rgba(255, 214, 0, 0.06) 28%,
+    rgba(255, 220, 90, 0.13) 45%,
+    rgba(255, 214, 0, 0.07) 62%,
     transparent 100%);
-  background-size: 220% 100%;
+  background-size: 280% 100%;
   background-position: 0% 0%;
   opacity: 0;
   transition: opacity var(--slow) var(--ease);
-  animation: smokeWave 9s linear infinite;
+  animation: smokeWave 11s linear infinite;
+  filter: blur(1.5px);
 }
-.mini-player.visible::before { opacity: 1; }
-body.paused .mini-player::before { animation-play-state: paused; opacity: 0.4; }
+.mini-player.visible::before { opacity: 0.85; }
+body.paused .mini-player::before { animation-play-state: paused; opacity: 0.35; }
 @keyframes smokeWave {
   0%   { background-position: 0% 0%; }
   100% { background-position: 100% 0%; }
+}
+
+/* Extra soft smoke layer for more depth */
+.mini-player::after {
+  content: ''; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background: linear-gradient(100deg,
+    transparent 5%,
+    rgba(255, 214, 0, 0.04) 32%,
+    rgba(255, 220, 90, 0.09) 52%,
+    rgba(255, 214, 0, 0.05) 70%,
+    transparent 95%);
+  background-size: 320% 100%;
+  background-position: 20% 0%;
+  opacity: 0;
+  transition: opacity var(--slow) var(--ease);
+  animation: smokeWave2 14s linear infinite reverse;
+  filter: blur(3px);
+}
+.mini-player.visible::after { opacity: 0.6; }
+body.paused .mini-player::after { animation-play-state: paused; opacity: 0.25; }
+@keyframes smokeWave2 {
+  0%   { background-position: 20% 0%; }
+  100% { background-position: 120% 0%; }
 }
 .mini-player .player-body, .mini-player .progress-container { position: relative; z-index: 1; }
 .mini-player.visible { transform: translateY(0); }
